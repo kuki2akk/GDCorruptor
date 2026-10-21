@@ -1,0 +1,17 @@
+{
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081"
+	},
+	"id": "user.gd_corruptor",
+	"name": "GDCorruptor",
+	"version": "v1.0.0-beta",
+	"developer": "bobrito777",
+	"description": "This mod is in beta and may contain bugs. It is recommended to save everything before using it.",
+	"tags": ["gameplay", "enhancement", "utility"],
+	"dependencies": {
+		"geode.node-ids": {
+			"version": ">=1.21.1"
+		}
+	}
+}
