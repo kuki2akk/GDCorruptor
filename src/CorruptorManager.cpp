@@ -5,6 +5,7 @@
 #include <Geode/binding/PlayerObject.hpp>
 #include <Geode/binding/FMODAudioEngine.hpp>
 #include <Geode/fmod/fmod.hpp>
+#include <Geode/fmod/fmod_dsp_effects.h>
 
 #include <algorithm>
 #include <cmath>
@@ -156,18 +157,24 @@ void CorruptorManager::onGlobalTick(float dt) {
         }
     }
 
-    // Периодический сброс питча
+    // Аудио: цели меняются редко (1.2с), значения плавно ползут к ним
     if (m_audioTimer <= 0.f) {
-        applyRandomPitch();
-        m_audioTimer = 0.4f;
+        pickAudioTargets();
+        m_audioTimer = 1.2f;
     } else {
         m_audioTimer -= dt;
     }
+    applyAudioSmoothing(dt);
 
     // Сдвиг/поворот всей сцены — видно в любом экране игры
     applySceneGlitch(scene);
 
-    applyTextureChaos(dt);
+    // Текстурная порча не каждый тик — с паузой, чтобы хаос нарастал плавно
+    m_textureCooldown = std::max(0.f, m_textureCooldown - dt);
+    if (m_textureCooldown <= 0.f) {
+        applyTextureChaos(dt);
+        m_textureCooldown = 0.2f;
+    }
 
     if (!m_autoMode && m_burstTime <= 0.f && m_previewTime <= 0.f) {
         stopAll();
@@ -186,32 +193,68 @@ void CorruptorManager::applySpeedChaos(PlayerObject* player, PlayerState& state,
         const int idx = static_cast<int>(roll01() * std::size(kSpeeds)) % std::size(kSpeeds);
         player->m_playerSpeed = kSpeeds[idx];
         state.speedCorrupted = true;
-        m_speedCooldown = 0.6f;
+        m_speedCooldown = 1.2f;
     }
 }
 
-void CorruptorManager::applyRandomPitch() {
+void CorruptorManager::pickAudioTargets() {
+    auto* engine = FMODAudioEngine::sharedEngine();
+    if (engine == nullptr || engine->m_system == nullptr) {
+        return;
+    }
+    const float chaos01 = static_cast<float>(m_chaos) / 100.f;
+
+    // Питч всего микса (музыка + сфиксы), дисторшн и громкость музыки
+    m_targetPitch = 0.6f + roll01() * 1.1f;             // 0.6 .. 1.7
+    m_targetDistortion = (0.15f + roll01() * 0.75f) * chaos01; // 0 .. 0.9
+    m_targetMusicVolume = 0.25f + roll01() * 1.25f;     // 0.25 .. 1.5
+
+    if (!m_musicVolumeSaved) {
+        m_origMusicVolume = engine->m_musicVolume;
+        m_musicVolumeSaved = true;
+    }
+}
+
+void CorruptorManager::applyAudioSmoothing(float dt) {
     auto* engine = FMODAudioEngine::sharedEngine();
     if (engine == nullptr || engine->m_system == nullptr) {
         return;
     }
 
-    // Питч всего микса
+    // Медленное подползание к целям: переход занимает ~1.5-2 секунды,
+    // так что питч/дисторшн "плывут", а не дёргаются каждый раз.
+    const float k = std::min(1.f, dt * 2.0f);
+    m_curPitch += (m_targetPitch - m_curPitch) * k;
+    m_curDistortion += (m_targetDistortion - m_curDistortion) * k;
+    m_curMusicVolume += (m_targetMusicVolume - m_curMusicVolume) * k;
+
     FMOD::ChannelGroup* master = nullptr;
     if (engine->m_system->getMasterChannelGroup(&master) == FMOD_OK && master != nullptr) {
-        master->setPitch(0.5f + roll01() * 1.3f); // 0.5 .. 1.8
+        master->setPitch(m_curPitch);
     }
 
-    // Громкость музыки: канал фоновой музыки + сохранённое значение движка,
+    // DSP-дисторшн на канале музыки и на глобальном канале (сфиксы).
+    // DSP создаётся один раз и висит до stopAll; bypass экономит CPU при 0.
+    auto applyDsp = [engine](FMOD::DSP*& dsp, FMOD::ChannelGroup* group, float level) {
+        if (dsp == nullptr && group != nullptr) {
+            engine->m_system->createDSPByType(FMOD_DSP_TYPE_DISTORTION, &dsp);
+            if (dsp != nullptr) {
+                group->addDSP(0, dsp);
+            }
+        }
+        if (dsp != nullptr) {
+            dsp->setBypass(level < 0.01f);
+            dsp->setParameterFloat(FMOD_DSP_DISTORTION_LEVEL, level);
+        }
+    };
+    applyDsp(m_musicDistortion, engine->m_backgroundMusicChannel, m_curDistortion);
+    applyDsp(m_sfxDistortion, engine->m_globalChannel, m_curDistortion);
+
+    // Громкость музыки: пишем и в движок, и в сам канал,
     // чтобы игровой код не вернул громкость сам.
-    if (!m_musicVolumeSaved) {
-        m_origMusicVolume = engine->m_musicVolume;
-        m_musicVolumeSaved = true;
-    }
-    const float volume = 0.2f + roll01() * 1.3f; // 0.2 .. 1.5
-    engine->m_musicVolume = volume;
+    engine->m_musicVolume = m_curMusicVolume;
     if (engine->m_backgroundMusicChannel != nullptr) {
-        engine->m_backgroundMusicChannel->setVolume(volume);
+        engine->m_backgroundMusicChannel->setVolume(m_curMusicVolume);
     }
 }
 
@@ -248,7 +291,7 @@ void CorruptorManager::applySceneGlitch(CCScene* scene) {
             (roll01() * 2.f - 1.f) * 12.f,
             (roll01() * 2.f - 1.f) * 12.f));
     }
-    m_glitchCooldown = 0.1f;
+    m_glitchCooldown = 0.25f;
 }
 
 void CorruptorManager::applyTextureChaos(float dt) {
@@ -259,8 +302,8 @@ void CorruptorManager::applyTextureChaos(float dt) {
 
     const float chaos01 = static_cast<float>(m_chaos) / 100.f;
 
-    // Сколько узлов портить в этом кадре (0..40, растёт с процентом хаоса)
-    const float base = chaos01 * 40.f;
+    // Сколько узлов портить в этом кадре (0..18, растёт с процентом хаоса)
+    const float base = chaos01 * 18.f;
     int budget = static_cast<int>(base);
     if (roll01() < base - static_cast<float>(budget)) {
         ++budget;
@@ -552,7 +595,7 @@ void CorruptorManager::stopAll() {
     m_speedCooldown = 0.f;
     m_glitchCooldown = 0.f;
 
-    // Аудио -> нормальный питч и исходная громкость музыки
+    // Аудио -> нормальный питч, снятый дисторшн и исходная громкость музыки
     auto* engine = FMODAudioEngine::sharedEngine();
     if (engine != nullptr && engine->m_system != nullptr) {
         FMOD::ChannelGroup* master = nullptr;
@@ -560,11 +603,30 @@ void CorruptorManager::stopAll() {
             master->setPitch(1.f);
         }
     }
+    if (engine != nullptr) {
+        auto removeDsp = [](FMOD::DSP*& dsp, FMOD::ChannelGroup* group) {
+            if (dsp != nullptr) {
+                if (group != nullptr) {
+                    group->removeDSP(dsp);
+                }
+                dsp->release();
+            }
+            dsp = nullptr;
+        };
+        removeDsp(m_musicDistortion, engine->m_backgroundMusicChannel);
+        removeDsp(m_sfxDistortion, engine->m_globalChannel);
+    }
+    m_curPitch = 1.f;
+    m_targetPitch = 1.f;
+    m_curDistortion = 0.f;
+    m_targetDistortion = 0.f;
     if (engine != nullptr && m_musicVolumeSaved) {
         engine->m_musicVolume = m_origMusicVolume;
         if (engine->m_backgroundMusicChannel != nullptr) {
             engine->m_backgroundMusicChannel->setVolume(m_origMusicVolume);
         }
+        m_curMusicVolume = m_origMusicVolume;
+        m_targetMusicVolume = m_origMusicVolume;
         m_musicVolumeSaved = false;
     }
 

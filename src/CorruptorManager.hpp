@@ -9,6 +9,10 @@ using namespace geode::prelude;
 class PlayLayer;
 class PlayerObject;
 
+namespace FMOD {
+    class DSP;
+}
+
 class CorruptorManager {
 protected:
     struct PlayerState {
@@ -53,10 +57,24 @@ protected:
     float m_speedCooldown = 0.f;
     float m_audioTimer = 0.f;
     float m_glitchCooldown = 0.f;
+    float m_textureCooldown = 0.f;
 
     // Исходная громкость музыки: сохраняем при первой порче, возвращаем в stopAll
     float m_origMusicVolume = 1.f;
     bool m_musicVolumeSaved = false;
+
+    // Плавное аудио: цели меняются редко, текущие значения медленно
+    // подползают к ним — никаких резких скачков питча/дисторшна.
+    float m_curPitch = 1.f;
+    float m_targetPitch = 1.f;
+    float m_curDistortion = 0.f;
+    float m_targetDistortion = 0.f;
+    float m_curMusicVolume = 1.f;
+    float m_targetMusicVolume = 1.f;
+
+    // DSP-дисторшн: на канале музыки и на глобальном канале (сфиксы).
+    FMOD::DSP* m_musicDistortion = nullptr;
+    FMOD::DSP* m_sfxDistortion = nullptr;
 
     // Глюк всей сцены (сдвиг/поворот корня). Сцена retain()'ирована,
     // пока хранится указатель — переживает смену сцен без висения.
@@ -81,7 +99,8 @@ protected:
     bool chance(float base);
 
     void applySpeedChaos(PlayerObject* player, PlayerState& state, float dt);
-    void applyRandomPitch();
+    void pickAudioTargets();
+    void applyAudioSmoothing(float dt);
     void applySceneGlitch(CCScene* scene);
     void applyTextureChaos(float dt);
     void restoreCorruption(NodeCorruption& corruption);
