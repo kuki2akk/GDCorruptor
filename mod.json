@@ -1,11 +1,12 @@
 {
 	"geode": "5.11.2",
 	"gd": {
-		"win": "2.2081"
+		"win": "2.2081",
+		"android": "2.2081"
 	},
 	"id": "user.gd_corruptor",
 	"name": "GDCorruptor",
-	"version": "v1.1.0-beta",
+	"version": "v1.1.1-beta",
 	"developer": "bobrito777",
 	"description": "This mod is in beta and may contain bugs. It is recommended to save everything before using it.",
 	"tags": ["gameplay", "enhancement", "utility"],

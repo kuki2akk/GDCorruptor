@@ -4,6 +4,7 @@
 #include <Geode/binding/PlayLayer.hpp>
 #include <Geode/binding/PlayerObject.hpp>
 #include <Geode/binding/FMODAudioEngine.hpp>
+#include <Geode/binding/CCPartAnimSprite.hpp>
 #include <Geode/fmod/fmod.hpp>
 #include <Geode/fmod/fmod_dsp_effects.h>
 
@@ -18,6 +19,18 @@ namespace {
     constexpr size_t kMaxCorruptedNodes = 1200;
     constexpr size_t kMaxFramePool = 256;
     constexpr size_t kMaxVisited = 6000;
+
+    // Яркий «неоновый» цвет: один канал на максимуме — заметно на любом фоне
+    ccColor3B glitchColor(float r01, float r02, float r03) {
+        GLubyte ch[3] = { 0, 0, 0 };
+        const int hot = static_cast<int>(r01 * 3.f) % 3;
+        const int mid = (hot + 1 + static_cast<int>(r02 * 2.f)) % 3;
+        const int low = 3 - hot - mid;
+        ch[hot] = 255;
+        ch[mid] = static_cast<GLubyte>(40 + r03 * 180.f);
+        ch[low] = static_cast<GLubyte>(r02 * 70.f);
+        return ccc3(ch[0], ch[1], ch[2]);
+    }
 }
 
 CorruptorManager* CorruptorManager::get() {
@@ -320,6 +333,10 @@ void CorruptorManager::applyTextureChaos(float dt) {
             "GJ_button_01.png", "GJ_square_01.png", "GJ_square_02.png",
             "GJ_hammerIcon_001.png", "GJ_arrow_01_001.png",
             "player_01.png", "player_02.png", "player_03.png", "player_05.png",
+            "GJ_playBtn2_001.png", "GJ_likeBtn_001.png", "GJ_deleteIcon_001.png",
+            "GJ_stopEditorBtn_001.png", "GJ_arrow_02_001.png",
+            "gj_icon_001.png", "gj_icon_002.png", "gj_icon_003.png",
+            "gj_icon_010.png", "goldCoin_small01_001.png",
         };
         if (cache != nullptr) {
             for (const char* name : kSeedFrames) {
@@ -412,6 +429,8 @@ void CorruptorManager::applyTextureChaos(float dt) {
         // Дети батч-узлов не переносят смену текстуры/кадра — только цвет
         const bool batchChild = node->getParent() != nullptr &&
             geode::cast::typeinfo_cast<CCSpriteBatchNode*>(node->getParent()) != nullptr;
+        // У PartAnim-спрайтов своя логика кадров/частей — текстуру не трогаем
+        const bool partAnim = geode::cast::typeinfo_cast<CCPartAnimSprite*>(node) != nullptr;
 
         // Находим запись о порче узла; если нет — создаём и фиксируем
         // оригинальное состояние, чтобы всё вернуть по концу бёрста.
@@ -440,19 +459,16 @@ void CorruptorManager::applyTextureChaos(float dt) {
             }
             if (auto* sprite = geode::cast::typeinfo_cast<CCSprite*>(node)) {
                 c.origFlipX = sprite->isFlipX();
-                // Кадр/текстуру фиксируем только у «чистого» cocos2d::CCSprite:
-                // GD-подклассы (например CCPartAnimSprite) переопределяют
-                // setDisplayFrame и падают при внезапной подмене кадра.
+                // Текстуру фиксируем у любого спрайта, которому можем её
+                // подменить (не ребёнок батч-узла и не PartAnim-спрайт).
                 // displayFrame() НЕ используем: после чистки кэша кадров он
                 // может вернуть освобождённый указатель. Текстура спрайта
                 // удерживается самим спрайтом, плюс мы её явно retain()'им.
-                if (typeid(*node) == typeid(cocos2d::CCSprite)) {
-                    if (sprite->getTexture() != nullptr) {
-                        c.origTexture = sprite->getTexture();
-                        c.origTexture->retain();
-                        c.origRect = sprite->getTextureRect();
-                        c.hasTexture = true;
-                    }
+                if (!batchChild && !partAnim && sprite->getTexture() != nullptr) {
+                    c.origTexture = sprite->getTexture();
+                    c.origTexture->retain();
+                    c.origRect = sprite->getTextureRect();
+                    c.hasTexture = true;
                 }
             }
             node->retain();
@@ -460,44 +476,35 @@ void CorruptorManager::applyTextureChaos(float dt) {
             entry = &m_corruptions.back();
         }
 
-        // Тип искажения: цвет / подмена кадра / кусок текстуры /
-        // зеркалирование / сдвиг позиции / поворот / масштаб.
+        // Тип искажения: подмена текстуры / кусок текстуры / зеркалирование /
+        // неоновый цвет / сдвиг позиции / поворот / масштаб.
         auto* sprite = geode::cast::typeinfo_cast<CCSprite*>(node);
         auto* rgba = geode::cast::typeinfo_cast<CCNodeRGBA*>(node);
-        const bool plainSprite = sprite != nullptr &&
-            typeid(*node) == typeid(cocos2d::CCSprite);
+        // Подмена текстуры работает на любом CCSprite-подклассе: setDisplayFrame
+        // не вызываем вообще (GD-подклассы переопределяют его и могут упасть),
+        // а setTexture + setTextureRect дают тот же визуальный результат.
+        const bool canSwap = sprite != nullptr && !batchChild && !partAnim &&
+            sprite->getTexture() != nullptr && !m_framePool.empty();
         const float r = roll01();
-        if (r < 0.30f) {
-            if (rgba != nullptr) {
-                // Каскад отключаем: иначе setColor дойдёт до детей, в т.ч. до
-                // спрайтов лейблов (батч-узлов), чей updateQuad падает на
-                // битом атласе после чистки кэшей игры.
-                rgba->setCascadeColorEnabled(false);
-                rgba->setColor(ccc3(
-                    static_cast<GLubyte>(60 + roll01() * 195.f),
-                    static_cast<GLubyte>(60 + roll01() * 195.f),
-                    static_cast<GLubyte>(60 + roll01() * 195.f)));
-                entry->colorCorrupted = true;
-            } else {
-                node->setRotation((roll01() * 2.f - 1.f) * (10.f + 30.f * chaos01));
-            }
-        } else if (r < 0.52f) {
-            if (plainSprite && !batchChild && !m_framePool.empty()) {
+        if (r < 0.35f) {
+            if (canSwap) {
                 const auto& poolEntry = m_framePool[
                     static_cast<size_t>(roll01() * m_framePool.size()) % m_framePool.size()];
                 // Кадр и его текстура из нашего пула — оба retain()'ированы,
                 // чистка кэшей игры их не трогает.
-                sprite->setDisplayFrame(poolEntry.frame);
+                sprite->setTexture(poolEntry.texture);
+                sprite->setTextureRect(poolEntry.frame->getRect());
             } else if (rgba != nullptr) {
                 rgba->setCascadeColorEnabled(false);
-                rgba->setColor(ccc3(
-                    static_cast<GLubyte>(60 + roll01() * 195.f),
-                    static_cast<GLubyte>(60 + roll01() * 195.f),
-                    static_cast<GLubyte>(60 + roll01() * 195.f)));
+                rgba->setColor(glitchColor(roll01(), roll01(), roll01()));
                 entry->colorCorrupted = true;
+            } else {
+                node->setRotation((roll01() * 2.f - 1.f) * (10.f + 30.f * chaos01));
             }
-        } else if (r < 0.60f) {
-            if (plainSprite && !batchChild && sprite->getTexture() != nullptr) {
+        } else if (r < 0.46f) {
+            // Случайный кусок собственной текстуры спрайта
+            if (sprite != nullptr && !batchChild && !partAnim &&
+                sprite->getTexture() != nullptr) {
                 const auto texSize = sprite->getTexture()->getContentSize();
                 if (texSize.width > 4.f && texSize.height > 4.f) {
                     const float w = std::min(texSize.width, std::max(2.f, roll01() * texSize.width));
@@ -506,20 +513,35 @@ void CorruptorManager::applyTextureChaos(float dt) {
                     const float y = roll01() * (texSize.height - h);
                     sprite->setTextureRect(CCRectMake(x, y, w, h));
                 }
+            } else if (rgba != nullptr) {
+                rgba->setCascadeColorEnabled(false);
+                rgba->setColor(glitchColor(roll01(), roll01(), roll01()));
+                entry->colorCorrupted = true;
             }
-        } else if (r < 0.68f) {
-            if (sprite != nullptr && !batchChild) {
+        } else if (r < 0.54f) {
+            if (sprite != nullptr && !batchChild && !partAnim) {
                 sprite->setFlipX(roll01() < 0.5f);
             } else {
                 node->setScaleX(-std::fabs(node->getScaleX()));
             }
-        } else if (r < 0.86f) {
+        } else if (r < 0.74f) {
+            if (rgba != nullptr) {
+                // Каскад отключаем: иначе setColor дойдёт до детей, в т.ч. до
+                // спрайтов лейблов (батч-узлов), чей updateQuad падает на
+                // битом атласе после чистки кэшей игры.
+                rgba->setCascadeColorEnabled(false);
+                rgba->setColor(glitchColor(roll01(), roll01(), roll01()));
+                entry->colorCorrupted = true;
+            } else {
+                node->setRotation((roll01() * 2.f - 1.f) * (10.f + 30.f * chaos01));
+            }
+        } else if (r < 0.88f) {
             // Сдвиг позиции — трясёт всё сразу, видно на любом узле
             const float amp = 1.5f + chaos01 * 6.f;
             node->setPosition(entry->origPos + ccp(
                 (roll01() * 2.f - 1.f) * amp,
                 (roll01() * 2.f - 1.f) * amp));
-        } else if (r < 0.94f) {
+        } else if (r < 0.96f) {
             node->setRotation((roll01() * 2.f - 1.f) * (10.f + 30.f * chaos01));
         } else {
             node->setScaleX(0.7f + roll01());
